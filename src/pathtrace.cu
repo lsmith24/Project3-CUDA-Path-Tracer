@@ -529,6 +529,57 @@ __global__ void denoiseToPBO(uchar4* pbo, glm::ivec2 resolution, glm::vec3* deno
     }
 }
 
+__global__ void denoiseImage(glm::ivec2 resolution, glm::vec3* denoise1, glm::vec3* denoise2, GBufferPixel* gBuffer,
+    float cPhi, float nPhi, float pPhi, int step)
+{
+    int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+    int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+    if (x < resolution.y && y < resolution.y) {
+        int idx = x + resolution.x * y;
+        glm::vec3 c = denoise1[idx];
+        glm::vec3 n = gBuffer[idx].nor;
+        glm::vec3 p = gBuffer[idx].pos;
+        glm::vec3 sum = glm::vec3(0.f);
+        float cumW = 0.f;
+
+        float kernel1D[5] = { 0.0625f, 0.25f, 0.375f, 0.25f, 0.0625f }; //from recitation slides kernel
+
+        for (int i = -2; i <= 2; i++) {
+            for (int j = -2; j <= 2; j++) {
+                float kernel2D = kernel1D[i + 2] * kernel1D[j + 2];
+                int xCoord = glm::clamp(x + step * i, 0, resolution.x - 1);
+                int yCoord = glm::clamp(y + step * j, 0, resolution.y - 1);
+                int curIdx = xCoord + yCoord * resolution.x;
+
+                glm::vec3 cCur = denoise1[curIdx];
+                glm::vec3 nCur = gBuffer[curIdx].nor;
+                glm::vec3 pCur = gBuffer[curIdx].pos;
+
+                float cDist = glm::dot(cCur - c, cCur - c);
+                float nDist = glm::dot(nCur - n, nCur - n);
+                float pDist = glm::dot(pCur - p, pCur - p);
+
+                float cWeight = glm::min(glm::exp(-cDist / cPhi), 1.f);
+                float nWeight = glm::min(glm::exp(-nDist / nPhi), 1.f);
+                float pWeight = glm::min(glm::exp(-pDist / pPhi), 1.f);
+
+                float weight = cWeight * nWeight * pWeight;
+
+                if (weight != 0) {
+                    sum += cCur * weight * kernel2D;
+                    cumW += weight * kernel2D;
+                }
+                else {
+                    sum += cCur * kernel2D;
+                    cumW += kernel2D;
+                }
+            }
+        }
+        denoise2[idx] = sum / cumW;
+    }
+}
+
 // Add the current iteration's output to the overall image
 __global__ void finalGather(int nPaths, glm::vec3 * image, PathSegment * iterationPaths)
 {
@@ -639,7 +690,7 @@ void pathtrace(int frame, int iter) {
         cudaDeviceSynchronize();
 
         if (depth == 0) {
-            generateGBuffer << <numblocksPathSegmentTracing, blockSize1d >> > (num_paths, dev_intersections, dev_paths, dev_gBuffer);
+            generateGBuffer<<<numblocksPathSegmentTracing, blockSize1d>>>(num_paths, dev_intersections, dev_paths, dev_gBuffer);
         }
 
         //cache first bounce
@@ -695,7 +746,7 @@ void showGBuffer(uchar4 * pbo) {
         (cam.resolution.y + blockSize2d.y - 1) / blockSize2d.y);
 
     // CHECKITOUT: process the gbuffer results and send them to OpenGL buffer for visualization
-    gbufferToPBO << <blocksPerGrid2d, blockSize2d >> > (pbo, cam.resolution, dev_gBuffer);
+    gbufferToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, dev_gBuffer);
 }
 
 void showImage(uchar4* pbo, int iter) {
@@ -720,7 +771,13 @@ void showDenoised(uchar4* pbo, int iter, float cPhi, float nPhi, float pPhi, int
 
     int numSteps = (int)glm::round(glm::log2(ui_filterSize));
     for (int i = 0; i < numSteps; i++) {
-        //TODO
+        // compute actual denoise
+        denoiseImage<<<blocksPerGrid2d, blockSize2d>>>(cam.resolution, dev_denoise1, dev_denoise2, dev_gBuffer, cPhi, nPhi, pPhi, i);
+        std::swap(dev_denoise1, dev_denoise2);
     }
     denoiseToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, dev_denoise1);
+    cudaDeviceSynchronize();
+    cudaMemcpy(hst_scene->state.image.data(), dev_denoise1,
+        cam.resolution.x * cam.resolution.y * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize();
 }
