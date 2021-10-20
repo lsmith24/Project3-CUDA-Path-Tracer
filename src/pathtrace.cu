@@ -28,7 +28,7 @@
 #define LENS_RADIUS 0.07
 #define FOCAL_DISTANCE 5
 
-#define GBUF_MODE 0
+#define GBUF_MODE 0 //change this to be 0 for pos or 1 for nor
 #define POS 0
 #define NOR 1
 
@@ -90,8 +90,8 @@ __global__ void gbufferToPBO(uchar4* pbo, glm::ivec2 resolution, GBufferPixel* g
         int index = x + (y * resolution.x);
         float timeToIntersect = gBuffer[index].t * 256.0;
 
-        glm::vec3 pos = glm::clamp(glm::abs(gBuffer[index].pos * 255.0f), 0.0f, 255.0f);
-        glm::vec3 nor = glm::clamp(glm::abs(gBuffer[index].nor * 20.0f), 0.0f, 255.0f);
+        glm::vec3 pos = glm::clamp(glm::abs(gBuffer[index].pos * 20.0f), 0.0f, 255.0f);
+        glm::vec3 nor = glm::clamp(glm::abs(gBuffer[index].nor * 255.0f), 0.0f, 255.0f);
 
         pbo[index].w = 0;
 

@@ -27,9 +27,9 @@ int lastLoopIterations = 0;
 bool ui_showGbuffer = true;
 bool ui_denoise = false;
 int ui_filterSize = 80;
-float ui_colorWeight = 0.f; //0.45f;
-float ui_normalWeight = 0.f; //0.35f;
-float ui_positionWeight = 0.f; //0.2f;
+float ui_colorWeight = 0.45f;
+float ui_normalWeight = 0.35f;
+float ui_positionWeight = 0.2f;
 bool ui_saveAndExit = false;
 
 static bool camchanged = true;
