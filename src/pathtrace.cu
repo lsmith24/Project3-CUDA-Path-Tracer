@@ -28,6 +28,10 @@
 #define LENS_RADIUS 0.07
 #define FOCAL_DISTANCE 5
 
+#define GBUF_MODE 0
+#define POS 0
+#define NOR 1
+
 #define FILENAME (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 #define checkCUDAError(msg) checkCUDAErrorFn(msg, FILENAME, __LINE__)
 void checkCUDAErrorFn(const char *msg, const char *file, int line) {
@@ -86,10 +90,21 @@ __global__ void gbufferToPBO(uchar4* pbo, glm::ivec2 resolution, GBufferPixel* g
         int index = x + (y * resolution.x);
         float timeToIntersect = gBuffer[index].t * 256.0;
 
+        glm::vec3 pos = glm::clamp(glm::abs(gBuffer[index].pos * 255.0f), 0.0f, 255.0f);
+        glm::vec3 nor = glm::clamp(glm::abs(gBuffer[index].nor * 20.0f), 0.0f, 255.0f);
+
         pbo[index].w = 0;
-        pbo[index].x = timeToIntersect;
-        pbo[index].y = timeToIntersect;
-        pbo[index].z = timeToIntersect;
+
+#if GBUF_MODE == POS
+        pbo[index].x = pos.x;
+        pbo[index].y = pos.y;
+        pbo[index].z = pos.z;
+#elif GBUF_MODE == NOR
+        pbo[index].x = nor.x;
+        pbo[index].y = nor.y;
+        pbo[index].z = nor.z;
+#endif
+
     }
 }
 
@@ -100,6 +115,9 @@ static Material * dev_materials = NULL;
 static PathSegment * dev_paths = NULL;
 static ShadeableIntersection * dev_intersections = NULL;
 static GBufferPixel* dev_gBuffer = NULL;
+static glm::vec3* dev_denoise1 = NULL;
+static glm::vec3* dev_denoise2 = NULL;
+
 // TODO: static variables for device memory, any extra info you need, etc
 // ...
 static ShadeableIntersection* dev_first_bounce = NULL;
@@ -128,6 +146,12 @@ void pathtraceInit(Scene *scene) {
 
     cudaMalloc(&dev_gBuffer, pixelcount * sizeof(GBufferPixel));
 
+    cudaMalloc(&dev_denoise1, pixelcount * sizeof(glm::vec3));
+    cudaMemset(dev_denoise1, 0, pixelcount * sizeof(glm::vec3));
+
+    cudaMalloc(&dev_denoise2, pixelcount * sizeof(glm::vec3));
+    cudaMemset(dev_denoise2, 0, pixelcount * sizeof(glm::vec3));
+
     // TODO: initialize any extra device memeory you need
 #if CACHE_BOUNCE || SORT_MATERIALS
     cudaMalloc(&dev_first_bounce, pixelcount * sizeof(ShadeableIntersection));
@@ -149,6 +173,9 @@ void pathtraceFree() {
     cudaFree(dev_materials);
     cudaFree(dev_intersections);
     cudaFree(dev_gBuffer);
+    cudaFree(dev_denoise1);
+    cudaFree(dev_denoise2);
+
     // TODO: clean up any extra device memory you created
 #if CACHE_BOUNCE || SORT_MATERIALS
     cudaFree(dev_first_bounce);
@@ -454,6 +481,7 @@ __global__ void shadeFakeMaterial (
   }
 }
 
+// GBUF + DENOISING
 __global__ void generateGBuffer(
     int num_paths,
     ShadeableIntersection* shadeableIntersections,
@@ -462,7 +490,42 @@ __global__ void generateGBuffer(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < num_paths)
     {
-        gBuffer[idx].t = shadeableIntersections[idx].t;
+        ShadeableIntersection& si = shadeableIntersections[idx];
+        Ray& ray = pathSegments[idx].ray;
+        gBuffer[idx].t = si.t;
+        gBuffer[idx].pos = ray.origin + si.t * ray.direction;
+        gBuffer[idx].nor = si.surfaceNormal;
+    }
+}
+
+__global__ void denoiseInit(int iteration, glm::ivec2 resolution, glm::vec3* denoise1, glm::vec3* image)
+{
+    int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+    int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+    if (x < resolution.y && y < resolution.y) {
+        int idx = x + resolution.x * y;
+        glm::vec3 pixel = image[idx];
+
+        denoise1[idx].x = pixel.x / iteration;
+        denoise1[idx].y = pixel.y / iteration;
+        denoise1[idx].z = pixel.z / iteration;
+    }
+}
+
+__global__ void denoiseToPBO(uchar4* pbo, glm::ivec2 resolution, glm::vec3* denoised)
+{
+    int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+    int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+    if (x < resolution.y && y < resolution.y) {
+        int idx = x + resolution.x * y;
+        glm::vec3 pixel = denoised[idx];
+
+        pbo[idx].w = 0;
+        pbo[idx].x = glm::clamp((int)(pixel.x * 255.0), 0, 255);
+        pbo[idx].y = glm::clamp((int)(pixel.y * 255.0), 0, 255);
+        pbo[idx].z = glm::clamp((int)(pixel.z * 255.0), 0, 255);
     }
 }
 
@@ -643,6 +706,21 @@ void showImage(uchar4* pbo, int iter) {
         (cam.resolution.y + blockSize2d.y - 1) / blockSize2d.y);
 
     // Send results to OpenGL buffer for rendering
-    sendImageToPBO << <blocksPerGrid2d, blockSize2d >> > (pbo, cam.resolution, iter, dev_image);
+    sendImageToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, iter, dev_image);
 }
 
+void showDenoised(uchar4* pbo, int iter, float cPhi, float nPhi, float pPhi, int ui_filterSize) {
+    const Camera& cam = hst_scene->state.camera;
+    const dim3 blockSize2d(8, 8);
+    const dim3 blocksPerGrid2d(
+        (cam.resolution.x + blockSize2d.x - 1) / blockSize2d.x,
+        (cam.resolution.y + blockSize2d.y - 1) / blockSize2d.y);
+
+    denoiseInit<<<blocksPerGrid2d, blockSize2d>>>(iter, cam.resolution, dev_denoise1, dev_image);
+
+    int numSteps = (int)glm::round(glm::log2(ui_filterSize));
+    for (int i = 0; i < numSteps; i++) {
+        //TODO
+    }
+    denoiseToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, dev_denoise1);
+}

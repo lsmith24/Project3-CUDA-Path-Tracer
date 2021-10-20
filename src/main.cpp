@@ -6,6 +6,8 @@
 #include "../imgui/imgui_impl_glfw.h"
 #include "../imgui/imgui_impl_opengl3.h"
 
+#define DENOISE 1
+
 static std::string startTimeString;
 
 // For camera controls
@@ -167,6 +169,9 @@ void runCuda() {
 
     if (ui_showGbuffer) {
         showGBuffer(pbo_dptr);
+    }
+    else if (ui_denoise) {
+        showDenoised(pbo_dptr, iteration, ui_colorWeight, ui_normalWeight, ui_positionWeight, ui_filterSize);
     }
     else {
         showImage(pbo_dptr, iteration);
