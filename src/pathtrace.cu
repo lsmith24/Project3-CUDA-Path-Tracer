@@ -32,8 +32,11 @@
 #define POS 0
 #define NOR 1
 
+#define TIMER 0
+
 #define FILENAME (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 #define checkCUDAError(msg) checkCUDAErrorFn(msg, FILENAME, __LINE__)
+
 void checkCUDAErrorFn(const char *msg, const char *file, int line) {
 #if ERRORCHECK
     cudaDeviceSynchronize();
@@ -118,6 +121,12 @@ static GBufferPixel* dev_gBuffer = NULL;
 static glm::vec3* dev_denoise1 = NULL;
 static glm::vec3* dev_denoise2 = NULL;
 
+#if TIMER
+cudaEvent_t start, stop;
+float totalTime = 0.0;
+bool countStart = true;
+#endif
+
 // TODO: static variables for device memory, any extra info you need, etc
 // ...
 static ShadeableIntersection* dev_first_bounce = NULL;
@@ -161,6 +170,11 @@ void pathtraceInit(Scene *scene) {
 #if DIRECT_LIGHTING
     cudaMalloc(&dev_lights, scene->lights.size() * sizeof(Geom));
     cudaMemcpy(dev_lights, scene->lights.data(), scene->lights.size() * sizeof(Geom), cudaMemcpyHostToDevice);
+#endif
+
+#if TIMER
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
 #endif
 
     checkCUDAError("pathtraceInit");
@@ -666,6 +680,10 @@ void pathtrace(int frame, int iter) {
     // Shoot ray into scene, bounce between objects, push shading chunks
     cudaMemset(dev_gBuffer, 0, pixelcount * sizeof(GBufferPixel));
 
+#if TIMER
+    cudaEventRecord(start);
+#endif
+
   bool iterationComplete = false;
     while (!iterationComplete) {
 
@@ -712,15 +730,33 @@ void pathtrace(int frame, int iter) {
   shadeFakeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>> (iter, num_paths, dev_intersections, dev_paths, dev_materials);
 #endif
 
-  dev_path_end = thrust::stable_partition(thrust::device, dev_paths, dev_path_end, should_end());
-  num_paths = dev_path_end - dev_paths;
+  //dev_path_end = thrust::stable_partition(thrust::device, dev_paths, dev_path_end, should_end());
+  //num_paths = dev_path_end - dev_paths;
 
 
-    if (num_paths == 0 || depth > traceDepth) {
+    /*if (num_paths == 0 || depth > traceDepth) {
         iterationComplete = true;
-    }
+    }*/
+
+  if (depth > traceDepth) {
+      iterationComplete = true;
+  }
         
 }
+
+#if TIMER
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float t;
+    cudaEventElapsedTime(&t, start, stop);
+    //std::cout << "CUDA TIME: " << t << std::endl;
+
+    if (countStart && iter > 20) {
+        totalTime += t;
+        std::cout << totalTime / iter << std::endl;
+        countStart = false;
+    }
+#endif
 
   // Assemble this iteration and apply it to the image
   dim3 numBlocksPixels = (pixelcount + blockSize1d - 1) / blockSize1d;

@@ -1,12 +1,14 @@
 #include "main.h"
 #include "preview.h"
 #include <cstring>
+#include <chrono>
 
 #include "../imgui/imgui.h"
 #include "../imgui/imgui_impl_glfw.h"
 #include "../imgui/imgui_impl_opengl3.h"
 
 #define DENOISE 1
+#define TIMER 0
 
 static std::string startTimeString;
 
@@ -24,9 +26,9 @@ static double lastY;
 int ui_iterations = 0;
 int startupIterations = 0;
 int lastLoopIterations = 0;
-bool ui_showGbuffer = true;
-bool ui_denoise = false;
-int ui_filterSize = 80;
+bool ui_showGbuffer = false;
+bool ui_denoise = true;
+int ui_filterSize = 200;
 float ui_colorWeight = 0.45f;
 float ui_normalWeight = 0.35f;
 float ui_positionWeight = 0.2f;
@@ -46,6 +48,10 @@ int iteration;
 
 int width;
 int height;
+
+#if TIMER
+float averageTime = 0;
+#endif
 
 //-------------------------------
 //-------------MAIN--------------
@@ -164,14 +170,38 @@ void runCuda() {
 
         // execute the kernel
         int frame = 0;
+
+#if TIMER
+        std::chrono::high_resolution_clock::time_point timer_start = std::chrono::high_resolution_clock::now();
+#endif
         pathtrace(frame, iteration);
+#if TIMER
+        std::chrono::high_resolution_clock::time_point timer_end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> period = timer_end - timer_start;
+        float prev_cpu_time = static_cast<decltype(prev_cpu_time)>(period.count());
+        averageTime = (averageTime * (iteration - 1) + prev_cpu_time) / (iteration);
+        cout << "Iterations:" << iteration << ", Time: " << prev_cpu_time << ", Average Time" << averageTime << endl;
+#endif
     }
 
     if (ui_showGbuffer) {
         showGBuffer(pbo_dptr);
     }
-    else if (ui_denoise) {
-        showDenoised(pbo_dptr, iteration, ui_colorWeight, ui_normalWeight, ui_positionWeight, ui_filterSize);
+    else if (iteration == ui_iterations) {
+        //showDenoised(pbo_dptr, iteration, ui_colorWeight, ui_normalWeight, ui_positionWeight, ui_filterSize);
+        if (ui_denoise) {
+#if TIMER
+            std::chrono::high_resolution_clock::time_point timer_start = std::chrono::high_resolution_clock::now();
+#endif
+            showDenoised(pbo_dptr, iteration, ui_colorWeight, ui_normalWeight, ui_positionWeight, ui_filterSize);
+#if TIMER
+            std::chrono::high_resolution_clock::time_point timer_end = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double, std::milli> period = timer_end - timer_start;
+            float prev_cpu_time = static_cast<decltype(prev_cpu_time)>(period.count());
+            cout << "Denoising time:" << prev_cpu_time << endl;
+#endif
+        }
+        
     }
     else {
         showImage(pbo_dptr, iteration);
